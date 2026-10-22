@@ -1,0 +1,197 @@
+# Run after security-tests.http, or run scripts/run-http-tests.mjs for both files.
+
+### 21. Admin statistics
+GET {{host}}/api/admin/stats
+Authorization: Bearer {{adminToken}}
+
+> {%
+client.test("21. admin statistics", function () {
+    client.assert(response.status === 200, "Expected 200");
+    client.assert(response.body.userCount >= 2, "Expected seeded users");
+});
+%}
+
+### 22. A regular user cannot read statistics
+GET {{host}}/api/admin/stats
+Authorization: Bearer {{userToken}}
+
+> {%
+client.test("22. user statistics forbidden", function () { client.assert(response.status === 403, "Expected 403"); });
+%}
+
+### 23. Create an isolated student for the extension exercises
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{"username":"extension_{{$timestamp}}","password":"Student123!"}
+
+> {%
+client.test("23. extension student created", function () { client.assert(response.status === 201, "Expected 201"); });
+client.global.set("extensionUsername", response.body.username);
+client.global.set("extensionId", response.body.id);
+%}
+
+### 24. Login once; preserve this access token through the role change
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"username":"{{extensionUsername}}","password":"Student123!"}
+
+> {%
+client.test("24. access and refresh lifetimes", function () {
+    client.assert(response.status === 200, "Expected 200");
+    client.assert(response.body.expiresInMs === 900000, "Access must last 15 minutes (default profile)");
+    client.assert(response.body.refreshExpiresInMs === 604800000, "Refresh must last 7 days");
+});
+client.global.set("extensionToken", response.body.token);
+client.global.set("extensionRefresh", response.body.refreshToken);
+%}
+
+### 25. No admin permission before the change
+GET {{host}}/api/admin/stats
+Authorization: Bearer {{extensionToken}}
+
+> {%
+client.test("25. initially not admin", function () { client.assert(response.status === 403, "Expected 403"); });
+%}
+
+### 26. Admin adds a role
+PUT {{host}}/api/admin/users/{{extensionId}}/roles
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"roles":["ROLE_ADMIN"]}
+
+> {%
+client.test("26. role added without removing USER", function () {
+    client.assert(response.status === 200, "Expected 200");
+    client.assert(response.body.roles.indexOf("ROLE_ADMIN") >= 0, "Expected admin role");
+    client.assert(response.body.roles.indexOf("ROLE_USER") >= 0, "Existing role must be preserved");
+});
+%}
+
+### 27. SAME access token now has permission, without another login
+GET {{host}}/api/admin/stats
+Authorization: Bearer {{extensionToken}}
+
+> {%
+client.test("27. existing token uses current DB roles", function () { client.assert(response.status === 200, "Expected 200"); });
+%}
+
+### 28. Refresh rotates the refresh token
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{"refreshToken":"{{extensionRefresh}}"}
+
+> {%
+client.test("28. refresh rotates", function () {
+    client.assert(response.status === 200, "Expected 200");
+    client.assert(response.body.refreshToken !== client.global.get("extensionRefresh"), "Token must rotate");
+});
+client.global.set("rotatedRefresh", response.body.refreshToken);
+%}
+
+### 29. Reusing the consumed refresh token fails
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{"refreshToken":"{{extensionRefresh}}"}
+
+> {%
+client.test("29. refresh replay rejected", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 30. Password change requires the old password
+PUT {{host}}/api/user/password
+Authorization: Bearer {{extensionToken}}
+Content-Type: application/json
+
+{"oldPassword":"wrong","newPassword":"Changed123!"}
+
+> {%
+client.test("30. old password required", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 31. Change password
+PUT {{host}}/api/user/password
+Authorization: Bearer {{extensionToken}}
+Content-Type: application/json
+
+{"oldPassword":"Student123!","newPassword":"Changed123!"}
+
+> {%
+client.test("31. password changed", function () { client.assert(response.status === 204, "Expected 204"); });
+%}
+
+### 32. Old password no longer works
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"username":"{{extensionUsername}}","password":"Student123!"}
+
+> {%
+client.test("32. old password rejected", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 33. Password change revokes existing refresh tokens
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{"refreshToken":"{{rotatedRefresh}}"}
+
+> {%
+client.test("33. password change revokes refresh", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 34. New password works
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"username":"{{extensionUsername}}","password":"Changed123!"}
+
+> {%
+client.test("34. new password works", function () { client.assert(response.status === 200, "Expected 200"); });
+client.global.set("freshExtensionToken", response.body.token);
+client.global.set("freshExtensionRefresh", response.body.refreshToken);
+%}
+
+### 35. Block the student
+PUT {{host}}/api/admin/users/{{extensionId}}/enabled
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"enabled":false}
+
+> {%
+client.test("35. user blocked", function () { client.assert(response.status === 200, "Expected 200"); });
+%}
+
+### 36. Existing access token stops immediately
+GET {{host}}/api/user/me
+Authorization: Bearer {{freshExtensionToken}}
+
+> {%
+client.test("36. blocked user's old token rejected", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 37. Blocked user cannot refresh
+POST {{host}}/api/auth/refresh
+Content-Type: application/json
+
+{"refreshToken":"{{freshExtensionRefresh}}"}
+
+> {%
+client.test("37. blocked user cannot refresh", function () { client.assert(response.status === 401, "Expected 401"); });
+%}
+
+### 38. Re-enable the test student
+PUT {{host}}/api/admin/users/{{extensionId}}/enabled
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"enabled":true}
+
+> {%
+client.test("38. user re-enabled", function () { client.assert(response.status === 200, "Expected 200"); });
+%}

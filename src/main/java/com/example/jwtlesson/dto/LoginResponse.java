@@ -7,5 +7,7 @@ public record LoginResponse(
         String tokenType,     // "Bearer"
         long expiresInMs,
         String username,
-        List<String> roles) {
+        List<String> roles,
+        String refreshToken,
+        long refreshExpiresInMs) {
 }

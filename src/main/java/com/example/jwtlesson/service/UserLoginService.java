@@ -10,19 +10,16 @@ import com.example.jwtlesson.entity.User;
 import com.example.jwtlesson.exception.UsernameTakenException;
 import com.example.jwtlesson.repository.RoleRepository;
 import com.example.jwtlesson.repository.UserRepository;
-import com.example.jwtlesson.security.JwtUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 
 @Service
@@ -30,10 +27,10 @@ import java.util.Set;
 public class UserLoginService {
 
     private final AuthenticationManager authenticationManager;
-    private final JwtUtil jwtUtil;
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final PasswordEncoder passwordEncoder;
+    private final RefreshTokenService refreshTokens;
 
     /**
      * 1. AuthenticationManager checks name + password (throws BadCredentialsException if wrong)
@@ -44,14 +41,7 @@ public class UserLoginService {
                 new UsernamePasswordAuthenticationToken(request.username(), request.password()));
 
         UserDetails userDetails = (UserDetails) authentication.getPrincipal();
-        String token = jwtUtil.generateToken(userDetails);
-
-        List<String> roles = userDetails.getAuthorities().stream()
-                .map(GrantedAuthority::getAuthority)
-                .toList();
-
-        return new LoginResponse(token, "Bearer", jwtUtil.getExpirationMs(),
-                userDetails.getUsername(), roles);
+        return refreshTokens.issue(userDetails);
     }
 
     /** New users always get ROLE_USER only. Admins are never created through this endpoint. */

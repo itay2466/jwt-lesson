@@ -312,5 +312,6 @@ Content-Type: application/json
 #   a. In application.properties set:  jwt.expiration-ms=60000   (1 minute)
 #   b. Restart the application, run request 7 (user login).
 #   c. Wait more than 1 minute, run request 8 -> expect 401.
-#   d. Set jwt.expiration-ms back to 3600000 and restart.
+#   d. Return to the default profile (900000 ms / 15 minutes) and restart.
+#      Or run the short-token profile and: node scripts/test-expiry.mjs
 ###############################################################################

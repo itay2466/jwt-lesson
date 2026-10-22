@@ -1,0 +1,67 @@
+name: Build and integration tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: jwt_lesson_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jwt_lesson_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build and test against PostgreSQL 16
+        run: mvn -B -ntp verify
+        env:
+          TEST_DB_URL: jdbc:postgresql://localhost:5432/jwt_lesson_test
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: postgres
+      - name: Test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: target/surefire-reports/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run all HTTP examples and the real 60-second expiry test
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/jwt_lesson_test
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+        run: |
+          set -euo pipefail
+          java -jar target/jwt-lesson-1.0.0.jar --server.port=8081 > app.log 2>&1 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8081/api/public/hello > /dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then cat app.log; exit 1; fi
+          node scripts/run-http-tests.mjs http://localhost:8081
+          kill "$app_pid"
+          wait "$app_pid" || true
+          java -jar target/jwt-lesson-1.0.0.jar --server.port=8081 --spring.profiles.active=short-token > short-token.log 2>&1 &
+          app_pid=$!
+          ready=false
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8081/api/public/hello > /dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then cat short-token.log; exit 1; fi
+          node scripts/test-expiry.mjs http://localhost:8081

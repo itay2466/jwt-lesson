@@ -1,0 +1,12 @@
+package com.example.jwtlesson.repository;
+
+import com.example.jwtlesson.entity.Role;
+import com.example.jwtlesson.entity.RoleName;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface RoleRepository extends JpaRepository<Role, Long> {
+
+    Optional<Role> findByName(RoleName name);
+}

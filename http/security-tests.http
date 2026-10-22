@@ -1,0 +1,316 @@
+###############################################################################
+# Spring Security + JWT - REST tests for the IntelliJ IDEA HTTP Client
+#
+# How to run:
+#   1. Start PostgreSQL and the application (JwtLessonApplication).
+#   2. Open this file in IntelliJ IDEA Ultimate.
+#   3. Choose the environment "dev" (from http-client.env.json, same folder).
+#   4. Click "Run All Requests in File" (or run one by one, top to bottom -
+#      requests 6 and 7 save tokens that later requests use).
+#   5. Results: the "Tests" tab in the Services tool window (green / red).
+###############################################################################
+
+
+### 1. Public endpoint - no token needed -> 200
+GET {{host}}/api/public/hello
+
+> {%
+    client.test("1. public endpoint is open (200)", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+    });
+%}
+
+
+### 2. Protected endpoint WITHOUT a token -> 401
+GET {{host}}/api/user/me
+
+> {%
+    client.test("2. no token -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 3. Login with a WRONG password -> 401
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "wrong-password"
+}
+
+> {%
+    client.test("3. wrong password -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+        client.assert(response.body.error === "Invalid username or password", "Unexpected message");
+    });
+%}
+
+
+### 4. Login with a user that does NOT exist -> 401 with the SAME message (no user enumeration)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "no_such_user",
+  "password": "whatever123"
+}
+
+> {%
+    client.test("4. unknown user -> same 401 message as wrong password", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+        client.assert(response.body.error === "Invalid username or password", "Message must not reveal that the user is missing");
+    });
+%}
+
+
+### 5. Login with empty fields -> 400 (validation)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "",
+  "password": ""
+}
+
+> {%
+    client.test("5. empty fields -> 400", function () {
+        client.assert(response.status === 400, "Expected 400, got " + response.status);
+        client.assert(response.body.fields.username !== undefined, "Expected an error on 'username'");
+    });
+%}
+
+
+### 6. Login as ADMIN -> 200 + token (saved as adminToken)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "Admin123!"
+}
+
+> {%
+    client.test("6. admin login -> 200 with a JWT", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.tokenType === "Bearer", "tokenType must be Bearer");
+        client.assert(response.body.token.split(".").length === 3, "A JWT has 3 parts: header.payload.signature");
+        client.assert(response.body.roles.indexOf("ROLE_ADMIN") >= 0, "admin must have ROLE_ADMIN");
+    });
+    client.global.set("adminToken", response.body.token);
+%}
+
+
+### 7. Login as USER -> 200 + token (saved as userToken) + build a FORGED token
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "user",
+  "password": "User123!"
+}
+
+> {%
+    client.test("7. user login -> 200 with ROLE_USER only", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.roles.length === 1, "user must have exactly one role");
+        client.assert(response.body.roles[0] === "ROLE_USER", "user must have ROLE_USER");
+    });
+    client.global.set("userToken", response.body.token);
+
+    // Attack simulation: the user takes the ADMIN payload (sub=admin, roles=[ROLE_ADMIN])
+    // and glues it to HIS OWN signature. The signature no longer matches -> must be rejected.
+    var userParts = response.body.token.split(".");
+    var adminParts = client.global.get("adminToken").split(".");
+    client.global.set("forgedToken", userParts[0] + "." + adminParts[1] + "." + userParts[2]);
+%}
+
+
+### 8. USER token on a USER endpoint -> 200
+GET {{host}}/api/user/me
+Authorization: Bearer {{userToken}}
+
+> {%
+    client.test("8. user token on /api/user/me -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.username === "user", "Expected username 'user'");
+        client.assert(response.body.password === undefined, "Password must never be returned");
+    });
+%}
+
+
+### 9. USER token on an ADMIN endpoint -> 403 (authenticated, but wrong role)
+GET {{host}}/api/admin/users
+Authorization: Bearer {{userToken}}
+
+> {%
+    client.test("9. user token on admin endpoint -> 403", function () {
+        client.assert(response.status === 403, "Expected 403, got " + response.status);
+    });
+%}
+
+
+### 10. ADMIN token on an ADMIN endpoint -> 200, many-to-many roles, no password, no JSON loop
+GET {{host}}/api/admin/users
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("10. admin lists users -> 200, clean JSON", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(Array.isArray(response.body), "Expected a JSON array");
+
+        var admin = null;
+        for (var i = 0; i < response.body.length; i++) {
+            var u = response.body[i];
+            client.assert(u.password === undefined, "Password leaked for " + u.username);
+            client.assert(typeof u.roles[0] === "string", "roles must be plain strings (no nested objects -> no loop)");
+            if (u.username === "admin") { admin = u; }
+        }
+        client.assert(admin !== null, "admin must be in the list");
+        client.assert(admin.roles.length === 2, "admin must have 2 roles (many-to-many)");
+    });
+%}
+
+
+### 11. ADMIN token on a USER endpoint -> 200 (admin also has ROLE_USER)
+GET {{host}}/api/user/me
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("11. admin token on /api/user/me -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+        client.assert(response.body.username === "admin", "Expected username 'admin'");
+    });
+%}
+
+
+### 12. FORGED token (admin payload + user signature) -> 401
+GET {{host}}/api/admin/users
+Authorization: Bearer {{forgedToken}}
+
+> {%
+    client.test("12. forged token -> 401 (signature check works)", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 13. Garbage token -> 401
+GET {{host}}/api/user/me
+Authorization: Bearer this.is.not-a-jwt
+
+> {%
+    client.test("13. garbage token -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 14. Valid token but WITHOUT the "Bearer " prefix -> 401
+GET {{host}}/api/user/me
+Authorization: {{userToken}}
+
+> {%
+    client.test("14. missing 'Bearer ' prefix -> 401", function () {
+        client.assert(response.status === 401, "Expected 401, got " + response.status);
+    });
+%}
+
+
+### 15. Register a new user -> 201, gets ROLE_USER only (saved as newUsername)
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "student_{{$timestamp}}",
+  "password": "Student123!"
+}
+
+> {%
+    client.test("15. register -> 201 with ROLE_USER", function () {
+        client.assert(response.status === 201, "Expected 201, got " + response.status);
+        client.assert(response.body.roles.length === 1 && response.body.roles[0] === "ROLE_USER", "New user must get ROLE_USER only");
+        client.assert(response.body.password === undefined, "Password must never be returned");
+    });
+    client.global.set("newUsername", response.body.username);
+%}
+
+
+### 16. Login with the new user -> 200 (password was hashed and verified)
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "{{newUsername}}",
+  "password": "Student123!"
+}
+
+> {%
+    client.test("16. new user can log in -> 200", function () {
+        client.assert(response.status === 200, "Expected 200, got " + response.status);
+    });
+%}
+
+
+### 17. Register an EXISTING username -> 409
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "TryToTakeOver1!"
+}
+
+> {%
+    client.test("17. existing username -> 409", function () {
+        client.assert(response.status === 409, "Expected 409, got " + response.status);
+    });
+%}
+
+
+### 18. Register with a too-short password -> 400
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "shorty_{{$timestamp}}",
+  "password": "123"
+}
+
+> {%
+    client.test("18. short password -> 400", function () {
+        client.assert(response.status === 400, "Expected 400, got " + response.status);
+        client.assert(response.body.fields.password !== undefined, "Expected an error on 'password'");
+    });
+%}
+
+
+### 19. Try to register yourself as ADMIN (mass assignment) -> never ROLE_ADMIN
+# RegisterRequest has no "roles" field. Depending on the JSON settings, the extra field is
+# either ignored (201 with ROLE_USER) or rejected (400). Both are safe; ROLE_ADMIN is not.
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "hacker_{{$timestamp}}",
+  "password": "Hacker123!",
+  "roles": ["ROLE_ADMIN"]
+}
+
+> {%
+    client.test("19. client cannot choose its own role", function () {
+        var safe = response.status === 400 ||
+                   (response.status === 201 && response.body.roles.indexOf("ROLE_ADMIN") < 0);
+        client.assert(safe, "SECURITY BUG: got status " + response.status + " body " + JSON.stringify(response.body));
+    });
+%}
+
+
+###############################################################################
+# 20. Expired token (manual test)
+#   a. In application.properties set:  jwt.expiration-ms=60000   (1 minute)
+#   b. Restart the application, run request 7 (user login).
+#   c. Wait more than 1 minute, run request 8 -> expect 401.
+#   d. Set jwt.expiration-ms back to 3600000 and restart.
+###############################################################################
